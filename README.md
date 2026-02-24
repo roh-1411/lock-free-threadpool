@@ -1,6 +1,5 @@
 # lock-free-threadpool
 
-![CI](https://github.com/YOUR_USERNAME/lock-free-threadpool/actions/workflows/ci.yml/badge.svg)
 
 A production-grade C++17 lock-free thread pool with **Prometheus observability** — implementing Google SRE's Four Golden Signals via a live HTTP `/metrics` endpoint.
 
@@ -9,21 +8,21 @@ A production-grade C++17 lock-free thread pool with **Prometheus observability**
 ```
 ┌─────────────────────────────────────────────────────┐
 │                  ThreadPoolV3                       │
-│  ┌──────────────────────────────────────────────┐  │
-│  │  MetricsRegistry                             │  │
-│  │   Counter   tasks_submitted_total            │  │
-│  │   Counter   tasks_completed_total            │  │
-│  │   Counter   tasks_failed_total               │  │
-│  │   Gauge     queue_depth_current              │  │
-│  │   Gauge     active_workers_current           │  │
-│  │   Histogram task_latency_seconds (p99)       │  │
-│  └──────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  MetricsRegistry                             │   │
+│  │   Counter   tasks_submitted_total            │   │
+│  │   Counter   tasks_completed_total            │   │
+│  │   Counter   tasks_failed_total               │   │
+│  │   Gauge     queue_depth_current              │   │
+│  │   Gauge     active_workers_current           │   │
+│  │   Histogram task_latency_seconds (p99)       │   │
+│  └──────────────────────────────────────────────┘   │
 │                     ↓ wraps                         │
-│  ┌──────────────────────────────────────────────┐  │
-│  │  ThreadPoolV2 — lock-free MPMC queue         │  │
-│  │  CAS ring buffer, no mutex, no syscalls      │  │
-│  │  N worker threads (spin → yield strategy)   │  │
-│  └──────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  ThreadPoolV2 — lock-free MPMC queue         │   │
+│  │  CAS ring buffer, no mutex, no syscalls      │   │
+│  │  N worker threads (spin → yield strategy)    │   │
+│  └──────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────┘
          ↕ HTTP :9090
 ┌─────────────────────────────────────────────────────┐
