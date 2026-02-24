@@ -1,0 +1,30 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# Compiled binaries
+demo
+benchmark
+demo_tsan
+test_lockfree
+test_metrics
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+install_manifest.txt
+CTestTestfile.cmake
+_deps/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Sanitizer outputs
+*.log

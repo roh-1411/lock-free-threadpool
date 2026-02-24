@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Job 1: Release build + all tests
+  # ─────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test (${{ matrix.os }}, ${{ matrix.build_type }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        build_type: [Release, Debug]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -G Ninja
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure --parallel 4
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 2: ThreadSanitizer — catches data races in lock-free code
+  # This is the critical check for concurrent code correctness.
+  # ─────────────────────────────────────────────────────────────
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build
+
+      - name: Configure with TSan
+        run: |
+          cmake -B build-tsan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_TSAN=ON \
+            -G Ninja
+
+      - name: Build
+        run: cmake --build build-tsan --parallel
+
+      - name: Test (TSan)
+        working-directory: build-tsan
+        run: ctest --output-on-failure --parallel 1
+        env:
+          TSAN_OPTIONS: "halt_on_error=1 second_deadlock_stack=1"
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 3: AddressSanitizer + UBSan — memory errors & undefined behavior
+  # ─────────────────────────────────────────────────────────────
+  asan:
+    name: AddressSanitizer + UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build
+
+      - name: Configure with ASan
+        run: |
+          cmake -B build-asan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_SANITIZERS=ON \
+            -G Ninja
+
+      - name: Build
+        run: cmake --build build-asan --parallel
+
+      - name: Test (ASan)
+        working-directory: build-asan
+        run: ctest --output-on-failure
+        env:
+          ASAN_OPTIONS: "halt_on_error=1 detect_leaks=1"
+          UBSAN_OPTIONS: "halt_on_error=1 print_stacktrace=1"
