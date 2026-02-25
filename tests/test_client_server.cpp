@@ -4,6 +4,12 @@
  * These tests start a real TCP server on localhost, connect a client,
  * and verify end-to-end behavior. Uses loopback (127.0.0.1) so no
  * network required — works in CI without any special setup.
+ *
+ * PORT STRATEGY:
+ * Each test passes port=0 to TaskServer, which tells the OS to assign
+ * a free ephemeral port automatically. After start(), server->port()
+ * returns the actual port. This eliminates all port conflicts when
+ * tests run in parallel across jobs or within the same binary.
  */
 #include <gtest/gtest.h>
 #include <thread>
@@ -17,30 +23,23 @@
 
 using namespace std::chrono_literals;
 
-// Find a free port to avoid conflicts between tests
-static int test_port = 19000;
-static std::mutex port_mutex;
-int next_port() {
-    std::lock_guard<std::mutex> lk(port_mutex);
-    return test_port++;
-}
-
-// Helper: start server, connect client, run test, tear down
+// Helper: start server on a free OS-assigned port, connect client, tear down
 class ServerClientFixture : public ::testing::Test {
 protected:
     void SetUp() override {
-        port = next_port();
         registry = std::make_unique<MetricsRegistry>();
     }
 
     void start_server(TaskServer::Handler handler) {
-        server = std::make_unique<TaskServer>(port, std::move(handler), *registry, 2);
+        // Port 0 → OS picks a free ephemeral port, no conflicts in parallel runs
+        server = std::make_unique<TaskServer>(0, std::move(handler), *registry, 2);
         server->start();
-        std::this_thread::sleep_for(50ms);  // let server bind
+        std::this_thread::sleep_for(50ms);  // let server finish binding
     }
 
     void connect_client() {
-        client = std::make_unique<TaskClient>("127.0.0.1", port);
+        // Read back the actual port the OS assigned
+        client = std::make_unique<TaskClient>("127.0.0.1", server->port());
         client->connect();
     }
 
@@ -49,7 +48,6 @@ protected:
         if (server) server->stop();
     }
 
-    int port;
     std::unique_ptr<MetricsRegistry> registry;
     std::unique_ptr<TaskServer>      server;
     std::unique_ptr<TaskClient>      client;
@@ -124,10 +122,12 @@ TEST_F(ServerClientFixture, ConcurrentClients) {
     constexpr int TASKS_EACH  = 10;
     std::atomic<int> total_done{0};
 
+    const int actual_port = server->port();  // capture before threads start
+
     std::vector<std::thread> threads;
     for (int c = 0; c < NUM_CLIENTS; ++c) {
         threads.emplace_back([&, c]{
-            TaskClient cl("127.0.0.1", port);
+            TaskClient cl("127.0.0.1", actual_port);
             cl.connect();
             for (int i = 0; i < TASKS_EACH; ++i) {
                 std::string payload = "client" + std::to_string(c)

@@ -45,6 +45,17 @@
  *       return "result: " + input;
  *   });
  *
+ * PORT 0 SUPPORT:
+ * ---------------
+ * Passing port=0 lets the OS assign a free ephemeral port automatically.
+ * After start(), call port() to find out which port was assigned.
+ * This is the recommended approach for tests — it eliminates all port
+ * conflicts when tests run in parallel.
+ *
+ *   TaskServer server(0, handler, registry);  // OS picks a free port
+ *   server.start();
+ *   int actual_port = server.port();          // read it back
+ *
  * METRICS INTEGRATION:
  * --------------------
  * The server registers its own metrics in the shared registry:
@@ -80,7 +91,7 @@ public:
     using Handler = std::function<std::string(const std::string&)>;
 
     /**
-     * @param port      TCP port to listen on
+     * @param port      TCP port to listen on (pass 0 to let OS pick a free port)
      * @param handler   Function to run for each incoming task
      * @param registry  Metrics registry (shared with MetricsServer)
      * @param threads   Worker thread count
@@ -118,7 +129,7 @@ public:
     }
 
     void start() {
-        server_fd_ = setup_socket();
+        server_fd_ = setup_socket();  // port_ updated here if port=0 was passed
         running_.store(true, std::memory_order_release);
         accept_thread_ = std::thread([this]{ accept_loop(); });
         std::cout << "[TaskServer] Listening on :" << port_ << "\n";
@@ -134,6 +145,8 @@ public:
         if (accept_thread_.joinable()) accept_thread_.join();
     }
 
+    // Returns the actual port — useful when port=0 was passed and the OS
+    // assigned an ephemeral port. Call this after start().
     int port() const { return port_; }
 
     ~TaskServer() { if (running_) stop(); }
@@ -152,13 +165,22 @@ private:
         sockaddr_in addr{};
         addr.sin_family      = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
-        addr.sin_port        = htons(port_);
+        addr.sin_port        = htons(port_);  // htons(0) = let OS pick
 
         if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             ::close(fd);
             throw std::runtime_error("TaskServer: bind() failed on port "
                                      + std::to_string(port_));
         }
+
+        // If port 0 was requested, read back the OS-assigned port
+        if (port_ == 0) {
+            sockaddr_in bound{};
+            socklen_t len = sizeof(bound);
+            if (::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &len) == 0)
+                port_ = ntohs(bound.sin_port);
+        }
+
         if (::listen(fd, SOMAXCONN) < 0) {
             ::close(fd);
             throw std::runtime_error("TaskServer: listen() failed");
