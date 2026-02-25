@@ -1,20 +1,16 @@
-// Updated wait_all implementation using a two-phase approach with proper acquire semantics and double-checks.
-
 void wait_all() {
-    // Phase 1: Setup and initial checks
-    if (is_done()) {
-        // If done, return immediately
-        return;
+    // First phase: wait while tasks are being processed
+    while (active_tasks > 0) {
+        // Optionally yield or sleep to avoid busy waiting
     }
 
-    acquire_lock(); // Acquire necessary lock
-    // Double-check to avoid early return
-    if (is_done()) {
-        release_lock(); // Release lock if done
-        return;
+    // Second phase: check the queue
+    while (!is_queue_empty()) {
+        // Optionally yield or sleep to avoid busy waiting
     }
 
-    // Phase 2: Wait until all tasks are done
-    wait_for_tasks();
-    release_lock(); // Ensure lock is released after waiting
+    // Final check to ensure no active tasks
+    while (active_tasks > 0) {
+        // Optionally yield or sleep to avoid busy waiting
+    }
 }
