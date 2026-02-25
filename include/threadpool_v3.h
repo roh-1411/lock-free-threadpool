@@ -1,41 +1,5 @@
 #pragma once
 
-/**
- * threadpool_v3.h — Instrumented Thread Pool
- * ============================================
- *
- * Extends ThreadPoolV2 (lock-free MPMC queue) with full Prometheus
- * observability — the SRE "Four Golden Signals":
- *
- *   LATENCY     → task_latency_seconds histogram (p50/p99/p999)
- *   TRAFFIC     → tasks_submitted_total counter
- *   ERRORS      → tasks_failed_total counter
- *   SATURATION  → queue_depth_current gauge, active_workers_current gauge
- *
- * DESIGN DECISION — why wrap instead of modify?
- * ----------------------------------------------
- * ThreadPoolV2 is the lock-free core. We don't want to mix
- * observability concerns into the hot path. Instead, ThreadPoolV3
- * wraps the enqueue/execute boundary with timing and counters.
- *
- * This is the same pattern used in production systems:
- *   - nginx: ngx_http_log_module wraps the request handler
- *   - gRPC: interceptors wrap RPCs
- *   - Envoy: stats filter wraps every request
- *
- * HOW THE LATENCY TIMER WORKS:
- * ----------------------------
- * When a task is enqueued, we record a start timestamp.
- * We wrap the task in a lambda that:
- *   1. Runs the original task
- *   2. Computes elapsed time
- *   3. Calls histogram.observe(elapsed_seconds)
- *
- * This captures QUEUE WAIT TIME + EXECUTION TIME (end-to-end latency).
- * In a real system you might track these separately. Here we keep it
- * simple: total time from submit → complete.
- */
-
 #include "threadpool_v2.h"
 #include "metrics.h"
 #include <chrono>
@@ -54,13 +18,11 @@ public:
         MetricsRegistry* registry = nullptr)
         : pool_(num_threads)
     {
-        // Register metrics — if no registry provided, create a private one
         if (!registry) {
             private_registry_ = std::make_unique<MetricsRegistry>();
             registry = private_registry_.get();
         }
 
-        // Four Golden Signals
         tasks_submitted_ = registry->add_counter(
             "threadpool_tasks_submitted_total",
             "Total number of tasks submitted to the thread pool");
@@ -94,10 +56,15 @@ public:
     /**
      * enqueue — submit a task, returns a future.
      *
-     * Wraps the task to:
-     *   1. Record submission time
-     *   2. Update queue depth gauge
-     *   3. On execution: track active workers, measure latency, count errors
+     * ORDERING FIX:
+     * tasks_completed_->inc() and task_latency_->observe_since() are called
+     * BEFORE active_workers_->dec(). This is critical for wait_all() correctness.
+     *
+     * wait_all() polls active_tasks_ (inside pool_.wait_all()) dropping to zero
+     * as the signal that all work is done. If metric updates happened after the
+     * decrement, wait_all() could return before tasks_completed_ was updated,
+     * causing tests that read tasks_completed() immediately after wait_all()
+     * to observe a stale (too-low) count.
      */
     template<typename F, typename... Args>
     auto enqueue(F&& f, Args&&... args)
@@ -108,17 +75,15 @@ public:
         auto submit_time = std::chrono::steady_clock::now();
         tasks_submitted_->inc();
 
-        // Use promise/future directly so we can intercept exceptions
-        // (packaged_task stores exceptions silently in the future state)
         auto prom = std::make_shared<std::promise<R>>();
         auto future = prom->get_future();
 
-        // Bind the user function eagerly (captures args by value)
         auto fn = std::bind(std::forward<F>(f), std::forward<Args>(args)...);
 
         auto wrapper = [this, prom, fn=std::move(fn), submit_time]() mutable {
             active_workers_->inc();
             queue_depth_->set(static_cast<int64_t>(pool_.queue_depth()));
+
             bool ok = true;
             try {
                 if constexpr (std::is_void_v<R>) {
@@ -132,10 +97,18 @@ public:
                 tasks_failed_->inc();
                 ok = false;
             }
-            active_workers_->dec();
-            queue_depth_->set(static_cast<int64_t>(pool_.queue_depth()));
+
+            // Update metrics BEFORE decrementing active_workers_.
+            // pool_.wait_all() returns when active_tasks_ hits zero, which
+            // happens when threadpool_v2's worker calls fetch_sub on active_tasks_.
+            // Any metric updates that happen after that decrement are invisible
+            // to callers that read metrics immediately after wait_all().
             task_latency_->observe_since(submit_time);
             if (ok) tasks_completed_->inc();
+
+            // Decrement last — this is what unblocks wait_all().
+            active_workers_->dec();
+            queue_depth_->set(static_cast<int64_t>(pool_.queue_depth()));
         };
 
         pool_.enqueue(std::move(wrapper));
@@ -149,7 +122,6 @@ public:
         active_workers_->set(0);
     }
 
-    // Direct metric accessors (for testing without a registry)
     size_t tasks_submitted()  const { return tasks_submitted_->get(); }
     size_t tasks_completed()  const { return tasks_completed_->get(); }
     size_t tasks_failed()     const { return tasks_failed_->get(); }
@@ -162,10 +134,9 @@ public:
     ThreadPoolV3& operator=(const ThreadPoolV3&) = delete;
 
 private:
-    ThreadPoolV2<QueueCapacity>   pool_;
+    ThreadPoolV2<QueueCapacity>      pool_;
     std::unique_ptr<MetricsRegistry> private_registry_;
 
-    // Metric pointers — owned by the registry, lifetime >= pool
     Counter*   tasks_submitted_{nullptr};
     Counter*   tasks_completed_{nullptr};
     Counter*   tasks_failed_{nullptr};
