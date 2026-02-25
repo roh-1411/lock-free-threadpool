@@ -131,6 +131,11 @@ public:
         while (!queue_.empty() || active_tasks_.load(std::memory_order_acquire) > 0) {
             std::this_thread::yield();
         }
+        // seq_cst fence: establishes happens-before between all completed
+        // task bodies (e.g. ++count) and any reads the caller does after
+        // wait_all() returns. Without this, TSan correctly flags a race
+        // between worker writes and the caller's post-wait read.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
     }
 
     // --- Metrics (useful for SRE monitoring) ---
@@ -180,9 +185,12 @@ private:
                 // Increment BEFORE executing — closes the wait_all() gap.
                 // If we incremented after, wait_all() could observe
                 // queue.empty() && active==0 between dequeue and increment.
-                ++active_tasks_;
+                active_tasks_.fetch_add(1, std::memory_order_relaxed);
                 (*task)();              // execute
-                --active_tasks_;
+                // seq_cst ensures all writes inside the task body are
+                // visible before active_tasks_ drops to zero.
+                // This pairs with the seq_cst fence in wait_all().
+                active_tasks_.fetch_sub(1, std::memory_order_seq_cst);
                 ++total_completed_;
                 continue;
             }
