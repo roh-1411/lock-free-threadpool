@@ -128,14 +128,24 @@ public:
      * which would cause wait_all to return prematurely.
      */
     void wait_all() {
+        // Spin until queue is drained and no tasks are executing.
         while (!queue_.empty() || active_tasks_.load(std::memory_order_acquire) > 0) {
             std::this_thread::yield();
         }
-        // seq_cst fence: establishes happens-before between all completed
-        // task bodies (e.g. ++count) and any reads the caller does after
-        // wait_all() returns. Without this, TSan correctly flags a race
-        // between worker writes and the caller's post-wait read.
-        std::atomic_thread_fence(std::memory_order_seq_cst);
+        // Establish a happens-before edge with the last worker's fetch_sub.
+        //
+        // TSan tracks happens-before through synchronization operations on
+        // the SAME atomic variable. A free-standing fence alone is not enough
+        // because TSan needs to see a matching acquire/release pair on the
+        // same object to connect the two threads.
+        //
+        // By doing a seq_cst load of active_tasks_ here (after workers have
+        // done a seq_cst fetch_sub on it), TSan sees:
+        //   worker: fetch_sub(seq_cst)  → releases all task-body writes
+        //   caller: load(seq_cst)       → acquires those writes
+        // This gives TSan the concrete edge it needs to stop reporting a race
+        // between worker writes (e.g. ++count) and caller reads.
+        (void)active_tasks_.load(std::memory_order_seq_cst);
     }
 
     // --- Metrics (useful for SRE monitoring) ---
