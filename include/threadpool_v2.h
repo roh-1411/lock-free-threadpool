@@ -50,6 +50,21 @@
  * If enqueue returns false, the queue is full — caller must retry.
  * This is "backpressure" — a critical distributed systems concept.
  * (Kafka, gRPC, and TCP all implement backpressure this way.)
+ *
+ * ACTIVE TASK COUNTING — correctness note:
+ * -----------------------------------------
+ * active_tasks_ is incremented BEFORE executing the task and
+ * decremented AFTER. This is critical for wait_all() correctness.
+ *
+ * WRONG ordering (causes wait_all() to return too early):
+ *   dequeue → [gap] → ++active → execute → --active
+ *                      ^^^^^
+ *   wait_all() can observe queue.empty() && active==0 in this gap,
+ *   even though a task was just dequeued and hasn't started yet.
+ *
+ * CORRECT ordering:
+ *   ++active → dequeue → execute → --active
+ *   Now active>0 as soon as we commit to running the task.
  */
 template<size_t QueueCapacity = 1024>
 class ThreadPoolV2 {
@@ -106,7 +121,11 @@ public:
 
     /**
      * wait_all — block until queue is empty and no tasks are running.
-     * Uses spin+yield (no mutex needed — queue reports its own size).
+     *
+     * Correctness depends on active_tasks_ being incremented BEFORE
+     * the task executes (see worker_loop). This ensures there is no
+     * window where a task has been dequeued but not yet counted,
+     * which would cause wait_all to return prematurely.
      */
     void wait_all() {
         while (!queue_.empty() || active_tasks_.load(std::memory_order_acquire) > 0) {
@@ -146,6 +165,11 @@ private:
      *
      * This is the same strategy used by the Linux kernel's
      * work queue and by the Go runtime scheduler.
+     *
+     * ACTIVE TASK ORDERING:
+     *   ++active_tasks_ happens BEFORE executing the task.
+     *   This closes the gap that would cause wait_all() to return
+     *   before all work is truly done.
      */
     void worker_loop() {
         constexpr int SPIN_COUNT = 64;  // spins before yielding
@@ -153,6 +177,9 @@ private:
         while (true) {
             // Try to get a task
             if (auto task = queue_.try_dequeue()) {
+                // Increment BEFORE executing — closes the wait_all() gap.
+                // If we incremented after, wait_all() could observe
+                // queue.empty() && active==0 between dequeue and increment.
                 ++active_tasks_;
                 (*task)();              // execute
                 --active_tasks_;
